@@ -8,6 +8,19 @@ team for note worthy changes.
 Version 1.x.x
 -------------
 
+Version 1.14.0
+^^^^^^^^^^^^^^
+
+*In Progress*
+
+* Added the ``Message-ID`` MIME header to outgoing messages
+* Attempt SSH authentication with all agent-provided SSH keys
+* Deleted ``Pipfile.lock`` from repository to prevent hash issues between python interpreter versions
+* Add ``--three`` to ``pipenv install`` and ``pipenv --update`` startup procedures to force use of Python 3
+* Added server support for installing missing plugin requirements during initialization
+* Added asynchronous RPC methods to the client
+* Added GraphQL and database schema documentation
+
 Version 1.13.1
 ^^^^^^^^^^^^^^
 
