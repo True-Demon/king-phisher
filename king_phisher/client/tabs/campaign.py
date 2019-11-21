@@ -154,6 +154,7 @@ class CampaignViewGenericTableTab(CampaignViewGenericTab):
 	table. This query is provided with the following three parameters: campaign,
 	count and cursor.
 	"""
+	secret_columns = ()
 	view_columns = ()
 	xlsx_worksheet_options = None
 	def __init__(self, *args, **kwargs):
@@ -192,12 +193,61 @@ class CampaignViewGenericTableTab(CampaignViewGenericTab):
 		treeview.set_model(tree_model_sort)
 		self.application.connect('server-connected', self.signal_kp_server_connected)
 
+		tab_config = self._tab_config
 		filter_revealer = self.gobjects['revealer_filter']
+		filter_revealer.set_reveal_child(tab_config['filter.show'])
 		menu_item = Gtk.CheckMenuItem.new_with_label('Show Filter')
 		menu_item.set_active(filter_revealer.get_reveal_child())
 		menu_item.connect('toggled', self.signal_toggled_show_filter)
 		menu_item.show()
 		self.popup_menu.append(menu_item)
+
+		submenu = Gtk.Menu.new()
+		menu_item = Gtk.MenuItem.new_with_label('Show Columns')
+		menu_item.set_submenu(submenu)
+		menu_item.show()
+		self.popup_menu.append(menu_item)
+		visisble_columns = tab_config['columns.show']
+		for column in self.view_columns:
+			if column.title in self.secret_columns:
+				continue
+			visible = visisble_columns.get(column.title, True)
+			self.treeview_manager.column_views[column.title].set_visible(visible)
+			menu_item = Gtk.CheckMenuItem.new_with_label(column.title)
+			menu_item.set_active(visible)
+			menu_item.connect('toggled', self.signal_toggled_show_column, column)
+			menu_item.show()
+			submenu.append(menu_item)
+			visisble_columns[column.title] = visible
+
+	def __async_rpc_cb_server_event_db_inserted(self, results):
+		node = results['db']['node']
+		row_data = (str(node['id']),) + tuple(self.format_node_data(node))
+		self._tv_model.append(row_data)
+
+	def __async_rpc_cb_server_event_db_updated(self, results):
+		node = results['db']['node']
+		if node is None:
+			self.logger.warning('received server db event: updated but could not fetch the remote data')
+			return
+		node_id = str(node['id'])
+		ti = gui_utilities.gtk_list_store_search(self._tv_model, node_id)
+		if ti is None:
+			self.logger.warning("received server db event: updated for non-existent row {0}:{1}".format(self.table_name, node_id))
+			return
+		row_data = tuple(self.format_node_data(node))
+		for idx, cell_data in enumerate(row_data, 1):
+			self._tv_model[ti][idx] = cell_data
+
+	@property
+	def _tab_config(self):
+		name = 'campaign.tab.' + self.table_name
+		if name not in self.config:
+			self.config[name] = {
+				'columns.show': {column.title: True for column in self.view_columns},
+				'filter.show': False
+			}
+		return self.config[name]
 
 	def signal_entry_changed_filter(self, entry):
 		text = entry.get_text()
@@ -220,11 +270,17 @@ class CampaignViewGenericTableTab(CampaignViewGenericTab):
 			((visible_records / all_records) if all_records > 0 else 1.0) * 100
 		))
 
+	def signal_toggled_show_column(self, widget, column):
+		visible = widget.get_active()
+		self.treeview_manager.column_views[column.title].set_visible(visible)
+		self._tab_config['columns.show'][column.title] = visible
+
 	def signal_toggled_show_filter(self, widget):
 		active = widget.get_active()
 		self.gobjects['revealer_filter'].set_reveal_child(active)
 		if active:
 			self.gobjects['entry_filter'].grab_focus()
+		self._tab_config['filter.show'] = active
 
 	def signal_kp_server_connected(self, _):
 		event_id = 'db-' + self.table_name.replace('_', '-')
@@ -235,26 +291,29 @@ class CampaignViewGenericTableTab(CampaignViewGenericTab):
 		server_events.connect(event_id, self.signal_server_event_db)
 
 	def signal_server_event_db(self, _, event_type, rows):
-		get_node = lambda id: self.rpc.graphql(self.node_query, {'id': str(id)})['db']['node']
 		for row in rows:
 			if str(row.campaign_id) != self.config['campaign_id']:
 				continue
-			for case in utilities.switch(event_type):
-				if case('inserted'):
-					row_data = (str(row.id),) + tuple(self.format_node_data(get_node(row.id)))
-					gui_utilities.glib_idle_add_wait(self._tv_model.append, row_data)
+			if event_type == 'deleted':
 				ti = gui_utilities.gtk_list_store_search(self._tv_model, str(row.id))
 				if ti is None:
-					self.logger.warning("received server db event: {0} for non-existent row {1}:{2}".format(event_type, self.table_name, str(row.id)))
-					break
-				if case('deleted'):
-					self._tv_model.remove(ti)
-					break
-				if case('updated'):
-					row_data = self.format_node_data(get_node(row.id))
-					for idx, cell_data in enumerate(row_data, 1):
-						self._tv_model[ti][idx] = cell_data
-					break
+					self.logger.warning("received server db event: deleted for non-existent row {0}:{1}".format(self.table_name, str(row.id)))
+				else:
+					gui_utilities.glib_idle_add_wait(self._tv_model.remove, ti)
+			elif event_type == 'inserted':
+				self.rpc.async_graphql(
+					self.node_query,
+					query_vars={'id': str(row.id)},
+					on_success=self.__async_rpc_cb_server_event_db_inserted,
+					when_idle=True
+				)
+			elif event_type == 'updated':
+				self.rpc.async_graphql(
+					self.node_query,
+					query_vars={'id': str(row.id)},
+					on_success=self.__async_rpc_cb_server_event_db_updated,
+					when_idle=True
+				)
 
 	def _export_lock(self):
 		show_dialog_warning = lambda: gui_utilities.show_dialog_warning('Export Failed', self.parent, 'Can not export data while loading.')
@@ -281,7 +340,7 @@ class CampaignViewGenericTableTab(CampaignViewGenericTab):
 			message = "Delete These {0:,} Rows?".format(len(row_ids))
 		if not gui_utilities.show_dialog_yes_no(message, self.parent, 'This information will be lost.'):
 			return
-		self.application.emit(self.table_name[:-1] + '-delete', row_ids)
+		self.application.emit(self.table_name[:-1].replace('_', '-') + '-delete', row_ids)
 
 	def _tv_filter(self, model, tree_iter, _):
 		if self._rule is None:

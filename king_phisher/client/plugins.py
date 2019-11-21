@@ -182,7 +182,7 @@ class ClientOptionString(ClientOptionMixin, plugins.OptionString):
 	def __init__(self, name, *args, **kwargs):
 		"""
 		.. versionchanged:: 1.9.0b5
-			Added the *multiline* option.
+			Added the *multiline* parameter.
 
 		:param str name: The name of this option.
 		:param str description: The description of this option.
@@ -501,6 +501,7 @@ class ClientPluginMailerAttachment(ClientPlugin):
 				return
 			output_path = os.path.join(tempfile.gettempdir(), os.path.basename(input_path))
 
+		self.logger.debug('processing the attachment file')
 		try:
 			new_output_path = self.process_attachment_file(input_path, output_path, target) or output_path
 		except Exception as error:

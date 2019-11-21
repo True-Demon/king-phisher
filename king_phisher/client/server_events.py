@@ -181,12 +181,11 @@ class ServerEventSubscriber(_GObject_GObject):
 
 		# db-<table name> events are the only ones that are valid right now
 		if not event_id.startswith('db-'):
-			self.logger.warning('received invalid data from the server event publisher (invalid event type)')
+			self.logger.warning("received invalid data from the server event publisher (invalid event id: {})".format(event_id))
 			return
-		event_id = 'db-' + event_id[3:].replace('_', '-')
-		klass = client_rpc.database_table_objects.get(event_id[3:])
+		klass = client_rpc.database_table_objects.get(event_id[3:].replace('-', '_'))
 		if klass is None:
-			self.logger.warning('received invalid data from the server event publisher (invalid event type)')
+			self.logger.warning("received invalid data from the server event publisher (invalid event id: {})".format(event_id))
 			return
 		new_objects = []
 		for obj in objects:
@@ -208,7 +207,8 @@ class ServerEventSubscriber(_GObject_GObject):
 		)
 		new_thread = utilities.Thread(
 			target=self.ws.run_forever,
-			kwargs={'http_no_proxy': (self.rpc.host,), 'sslopt': {'cert_reqs': ssl.CERT_NONE}}
+			kwargs={'http_no_proxy': (self.rpc.host,), 'sslopt': {'cert_reqs': ssl.CERT_NONE}},
+			name='ServerEventsDispatcher'
 		)
 		new_thread.daemon = True
 		new_thread.start()

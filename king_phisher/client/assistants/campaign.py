@@ -81,6 +81,14 @@ def _kpm_file_path_is_valid(file_path):
 		return False
 	return True
 
+def _homogenous_label_width(labels):
+	width = max(label.get_preferred_width().minimum_width for label in labels)
+	for label in labels:
+		label.set_property('width-request', width)
+
+def _set_icon(image, icon_name):
+	image.set_property('stock', icon_name)
+
 class CampaignAssistant(gui_utilities.GladeGObject):
 	"""
 	Display an assistant which walks the user through creating a new campaign or
@@ -97,6 +105,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			),
 			'button_select_kpm_dest_folder',
 			'button_select_kpm_file',
+			'button_url_ssl_issue_certificate',
 			'calendar_campaign_expiration',
 			'checkbutton_alert_subscribe',
 			'checkbutton_expire_campaign',
@@ -118,26 +127,37 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			'frame_company_existing',
 			'frame_company_new',
 			'image_intro_title',
+			'image_url_ssl_status',
 			'label_confirm_body',
 			'label_confirm_title',
 			'label_intro_body',
 			'label_intro_title',
+			'label_url_for_scheme',
+			'label_url_for_hostname',
+			'label_url_for_path',
 			'label_url_info_authors',
 			'label_url_info_created',
 			'label_url_info_description',
+			'label_url_info_title',
+			'label_url_info_for_authors',
 			'label_url_preview',
+			'label_url_ssl_for_status',
+			'label_url_ssl_status',
 			'label_validation_regex_mfa_token',
 			'label_validation_regex_password',
 			'label_validation_regex_username',
 			'listbox_url_info_classifiers',
+			'listbox_url_info_references',
 			'radiobutton_company_existing',
 			'radiobutton_company_new',
 			'radiobutton_company_none',
+			'revealer_url_ssl_settings',
 			'togglebutton_expiration_time',
 		),
 		top_level=(
 			'ClockHourAdjustment',
-			'ClockMinuteAdjustment'
+			'ClockMinuteAdjustment',
+			'StockExecuteImage',
 		)
 	)
 	top_gobject = 'assistant'
@@ -149,6 +169,8 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		:param campaign_id: The ID of the campaign to edit.
 		"""
 		super(CampaignAssistant, self).__init__(application)
+		if campaign_id is not None:
+			campaign_id = str(campaign_id)
 		self.campaign_id = campaign_id
 		self._close_ready = True
 		self._page_titles = {}
@@ -158,16 +180,29 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			if page_title:
 				self._page_titles[page_title] = page_n
 
-		campaign_edges = self.application.rpc.graphql("""\
-		{ db { campaigns { edges { node { id name } } } } }
-		""")['db']['campaigns']['edges']
+		campaign_edges = self.application.rpc.graphql(
+			'{ db { campaigns { edges { node { id name } } } } }',
+		)['db']['campaigns']['edges']
 		self._campaign_names = dict((edge['node']['name'], edge['node']['id']) for edge in campaign_edges)
+		self._cache_hostname = {}
 		self._cache_site_template = {}
-		self._cache_site_templates = {}
+		self._can_issue_certs = False
+		self._ssl_status = {}
 
 		self._expiration_time = managers.TimeSelectorButtonManager(self.application, self.gobjects['togglebutton_expiration_time'])
 		self._set_comboboxes()
 		self._set_defaults()
+
+		self._set_page_complete(False, page='Web Server URL')
+		self.application.rpc.async_graphql(
+			'{ ssl { status { enabled hasLetsencrypt hasSni } } }',
+			on_success=self.__async_rpc_cb_ssl_status
+		)
+		_homogenous_label_width((
+			self.gobjects['label_url_for_scheme'],
+			self.gobjects['label_url_ssl_for_status'],
+			self.gobjects['label_url_info_for_authors']
+		))
 
 		if not self.config['server_config']['server.require_id']:
 			self.gobjects['checkbutton_reject_after_credentials'].set_sensitive(False)
@@ -186,6 +221,26 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			self.gobjects['label_intro_body'].set_text('This assistant will walk you through creating and configuring a new King Phisher campaign.')
 			self.gobjects['label_intro_title'].set_text('New Campaign')
 
+	def __async_rpc_cb_issue_cert_error(self, error, message=None):
+		self._set_page_complete(True, page='Web Server URL')
+		self.gobjects['button_url_ssl_issue_certificate'].set_sensitive(True)
+		_set_icon(self.gobjects['image_url_ssl_status'], 'gtk-dialog-warning')
+		label = self.gobjects['label_url_ssl_status']
+		label.set_text('An error occurred while requesting a certificate for the specified hostname')
+		gui_utilities.show_dialog_error(
+			'Operation Error',
+			self.application.get_active_window(),
+			message or "Unknown error: {!r}".format(error)
+		)
+
+	def __async_rpc_cb_issue_cert_success(self, result):
+		self._set_page_complete(True, page='Web Server URL')
+		if not result['success']:
+			return self.__async_rpc_cb_issue_cert_error(None, result['message'])
+		_set_icon(self.gobjects['image_url_ssl_status'], 'gtk-yes')
+		label = self.gobjects['label_url_ssl_status']
+		label.set_text('A certificate for the specified hostname has been issued and loaded')
+
 	def __async_rpc_cb_populate_url_hostname_combobox(self, hostnames):
 		hostnames = sorted(hostnames)
 		model = self.gobjects['combobox_url_hostname'].get_model()
@@ -201,8 +256,15 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		metadata = template['metadata']
 		if metadata is None:
 			return
+		self.gobjects['label_url_info_title'].set_text(metadata['title'])
 		self.gobjects['label_url_info_authors'].set_text('\n'.join(metadata['authors']))
 		self.gobjects['label_url_info_description'].set_text(metadata['description'])
+		if metadata['referenceUrls']:
+			gui_utilities.gtk_listbox_populate_urls(
+				self.gobjects['listbox_url_info_references'],
+				metadata['referenceUrls'],
+				signals={'activate-link': self.signal_label_activate_link}
+			)
 		gui_utilities.gtk_listbox_populate_labels(self.gobjects['listbox_url_info_classifiers'], metadata['classifiers'])
 
 	def __async_rpc_cb_populate_url_scheme_combobox(self, addresses):
@@ -228,8 +290,8 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		elif gui_utilities.gtk_list_store_search(model, 'http/80'):
 			combobox_url_scheme.set_active_id('http/80')
 
-	def __async_rpc_cb_populate_url_path_combobox(self, hostname, results):
-		self._cache_site_templates[hostname] = results
+	def __async_rpc_cb_changed_url_hostname(self, hostname, results):
+		self._cache_hostname[hostname] = results
 		templates = results['siteTemplates']
 		combobox = self.gobjects['combobox_url_path']
 		combobox.set_property('button-sensitivity', templates['total'] > 0)
@@ -244,6 +306,22 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 				model.append((path + utilities.make_webrelpath(page), path))
 		# this is going to trigger a changed signal and the cascade effect will update the URL information and preview
 		combobox.set_active_id(utilities.make_webrelpath(gui_utilities.gtk_combobox_get_entry_text(combobox)))
+
+		sni_hostname = results['ssl']['sniHostname']
+		label = self.gobjects['label_url_ssl_status']
+		if sni_hostname is None:
+			_set_icon(self.gobjects['image_url_ssl_status'], 'gtk-no')
+			label.set_text('There is no certificate available for the specified hostname')
+			if self._can_issue_certs:
+				self.gobjects['button_url_ssl_issue_certificate'].set_sensitive(True)
+		else:
+			_set_icon(self.gobjects['image_url_ssl_status'], 'gtk-yes')
+			label.set_text('A certificate for the specified hostname is available')
+
+	def __async_rpc_cb_ssl_status(self, results):
+		self._ssl_status = results['ssl']['status']
+		self._can_issue_certs = all(results['ssl']['status'].values())
+		self._set_page_complete(True, page='Web Server URL')
 
 	@property
 	def campaign_name(self):
@@ -281,11 +359,17 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		return campaign
 
 	def _get_company_existing_id(self):
-		combobox_company = self.gobjects['combobox_company_existing']
-		model = combobox_company.get_model()
-		model_iter = combobox_company.get_active_iter()
-		if model is None or model_iter is None:
+		combobox = self.gobjects['combobox_company_existing']
+		model = combobox.get_model()
+		model_iter = combobox.get_active_iter()
+		if model is None:
 			return
+		if model_iter is None:
+			text = combobox.get_child().get_text().strip()
+			if text:
+				model_iter = gui_utilities.gtk_list_store_search(model, text, column=1)
+		if model_iter is None:
+			return None
 		return model.get_value(model_iter, 0)
 
 	def _get_company_new_id(self):
@@ -344,12 +428,12 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		model_iter = combobox.get_active_iter()
 		if model_iter is not None:
 			return model.get_value(model_iter, 0)
-		campaign_type = combobox.get_child().get_text().strip()
-		if not campaign_type:
+		text = combobox.get_child().get_text().strip()
+		if not text:
 			return
-		model_iter = gui_utilities.gtk_list_store_search(model, campaign_type, column=1)
+		model_iter = gui_utilities.gtk_list_store_search(model, text, column=1)
 		if model_iter is None:
-			return self.application.rpc('db/table/insert', db_table, 'name', campaign_type)
+			return self.application.rpc('db/table/insert', db_table, 'name', text)
 		return model.get_value(model_iter, 0)
 
 	def _get_webserver_url(self):
@@ -446,8 +530,14 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		if webserver_url.path:
 			self.gobjects['combobox_url_path'].get_child().set_text(utilities.make_webrelpath(webserver_url.path))
 
-	def _update_completion_status(self):
-		self.assistant.set_page_complete(self.assistant.get_nth_page(self.assistant.get_current_page()), self._get_kpm_path().is_valid)
+	def _set_page_complete(self, complete, page=None):
+		if page is None:
+			page = self.assistant.get_nth_page(self.assistant.get_current_page())
+		elif isinstance(page, str):
+			page = self.assistant.get_nth_page(self._page_titles[page])
+		elif isinstance(page, int):
+			page = self.assistant.get_nth_page(page)
+		self.assistant.set_page_complete(page, complete)
 
 	def signal_assistant_apply(self, _):
 		self._close_ready = False
@@ -547,7 +637,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		self.application.emit('campaign-changed', cid)
 
 		old_cid = self.config.get('campaign_id')
-		self.config['campaign_id'] = cid
+		self.config['campaign_id'] = str(cid)
 		self.config['campaign_name'] = properties['name']
 
 		_kpm_pathing = self._get_kpm_path()
@@ -556,6 +646,16 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 				gui_utilities.show_dialog_info('Failure', self.parent, 'Failed to import the message configuration.')
 			else:
 				gui_utilities.show_dialog_info('Success', self.parent, 'Successfully imported the message configuration.')
+
+		if self._ssl_status['hasSni']:
+			combobox_url_scheme = self.gobjects['combobox_url_scheme']
+			active = combobox_url_scheme.get_active()
+			if active != -1:
+				url_scheme = _ModelURLScheme(*combobox_url_scheme.get_model()[active])
+				if url_scheme.name == 'https':
+					hostname = gui_utilities.gtk_combobox_get_entry_text(self.gobjects['combobox_url_hostname'])
+					if hostname and not self.application.rpc('ssl/sni_hostnames/load', hostname):
+						gui_utilities.show_dialog_error('Failure', self.parent, 'Failed to load an SSL certificate for the specified hostname.')
 
 		self.config['mailer.webserver_url'] = self._get_webserver_url()
 		self.application.emit('campaign-set', old_cid, cid)
@@ -582,6 +682,20 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 					combobox.set_active_iter(model_iter)
 					self.gobjects['radiobutton_company_existing'].set_active(True)
 
+	def signal_button_clicked_issue_certificate(self, button):
+		button.set_sensitive(False)
+		self._set_page_complete(False, page='Web Server URL')
+		label = self.gobjects['label_url_ssl_status']
+		label.set_text('A certificate for the specified hostname is being requested')
+		hostname = gui_utilities.gtk_combobox_get_entry_text(self.gobjects['combobox_url_hostname'])
+		self.application.rpc.async_call(
+			'ssl/letsencrypt/issue',
+			(hostname,),
+			on_error=self.__async_rpc_cb_issue_cert_error,
+			on_success=self.__async_rpc_cb_issue_cert_success,
+			when_idle=True
+		)
+
 	def signal_calendar_prev(self, calendar):
 		today = datetime.date.today()
 		calendar_day = gui_utilities.gtk_calendar_get_pydate(calendar)
@@ -595,7 +709,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 
 	@gui_utilities.delayed_signal()
 	def signal_combobox_changed_set_url_information(self, _):
-		for label in ('info_authors', 'info_created', 'info_description'):
+		for label in ('info_title', 'info_authors', 'info_created', 'info_description'):
 			self.gobjects['label_url_' + label].set_text('')
 		hostname = gui_utilities.gtk_combobox_get_entry_text(self.gobjects['combobox_url_hostname'])
 		if not hostname:
@@ -609,6 +723,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			if row_iter:
 				path = model[row_iter][1]
 		gui_utilities.gtk_widget_destroy_children(self.gobjects['listbox_url_info_classifiers'])
+		gui_utilities.gtk_widget_destroy_children(self.gobjects['listbox_url_info_references'])
 		cached_result = self._cache_site_template.get((hostname, path))
 		if cached_result:
 			self.__async_rpc_cb_populate_url_info(hostname, path, cached_result)
@@ -617,7 +732,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			"""
 			query getSiteTemplate($hostname: String, $path: String) {
 			  siteTemplate(hostname: $hostname, path: $path) {
-				created path metadata { authors classifiers description pages }
+				created path metadata { title authors description referenceUrls classifiers pages }
 			  }
 			}
 			""",
@@ -645,26 +760,36 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 
 	@gui_utilities.delayed_signal()
 	def signal_combobox_changed_url_hostname(self, combobox):
+		self.gobjects['button_url_ssl_issue_certificate'].set_sensitive(False)
 		hostname = gui_utilities.gtk_combobox_get_entry_text(combobox)
 		if not hostname:
 			return
-		cached_result = self._cache_site_templates.get(hostname)
+		cached_result = self._cache_hostname.get(hostname)
 		if cached_result:
-			self.__async_rpc_cb_populate_url_path_combobox(hostname, cached_result)
+			self.__async_rpc_cb_changed_url_hostname(hostname, cached_result)
 			return
 		self.application.rpc.async_graphql(
 			"""
-			query getSiteTemplates($hostname: String) {
+			query getHostname($hostname: String) {
 			  siteTemplates(hostname: $hostname) {
 				total edges { node { hostname path metadata { pages } } }
 			  }
+			  ssl { sniHostname(hostname: $hostname) { enabled } }
 			}
 			""",
 			query_vars={'hostname': hostname},
-			on_success=self.__async_rpc_cb_populate_url_path_combobox,
+			on_success=self.__async_rpc_cb_changed_url_hostname,
 			cb_args=(hostname,),
 			when_idle=True
 		)
+
+	def signal_combobox_changed_url_scheme(self, combobox):
+		active = combobox.get_active()
+		if active == -1:
+			return
+		url_scheme = _ModelURLScheme(*combobox.get_model()[active])
+		revealer = self.gobjects['revealer_url_ssl_settings']
+		revealer.set_reveal_child(url_scheme.name == 'https')
 
 	def signal_entry_changed_campaign_name(self, entry):
 		campaign_name = entry.get_text().strip()
@@ -690,6 +815,9 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 	def signal_entry_changed_validation_regex(self, entry):
 		self._do_regex_validation(self.gobjects['entry_test_validation_text'].get_text(), entry)
 
+	def signal_label_activate_link(self, _, uri):
+		utilities.open_uri(uri)
+
 	def signal_kpm_select_clicked(self, _):
 		dialog = extras.FileChooserDialog('Import Message Configuration', self.parent)
 		dialog.quick_add_filter('King Phisher Message Files', '*.kpm')
@@ -700,7 +828,7 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 			return False
 		target_path = response['target_path']
 		self.gobjects['entry_kpm_file'].set_text(target_path)
-		self._update_completion_status()
+		self._set_page_complete(self._get_kpm_path().is_valid)
 
 		if not _kpm_file_path_is_valid(target_path):
 			return
@@ -723,11 +851,11 @@ class CampaignAssistant(gui_utilities.GladeGObject):
 		if not response:
 			return False
 		self.gobjects['entry_kpm_dest_folder'].set_text(response['target_path'])
-		self._update_completion_status()
+		self._set_page_complete(self._get_kpm_path().is_valid)
 
 	def signal_kpm_entry_clear(self, entry_widget):
 		entry_widget.set_text('')
-		self._update_completion_status()
+		self._set_page_complete(self._get_kpm_path().is_valid)
 
 	def signal_radiobutton_toggled(self, radiobutton):
 		if not radiobutton.get_active():

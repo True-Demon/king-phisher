@@ -127,6 +127,7 @@ class KingPhisherClientApplication(_Gtk_Application):
 		'config-load': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, (bool,)),
 		'config-save': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, ()),
 		'credential-delete': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, (object,)),
+		'deaddrop-connection-delete': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, (object,)),
 		'exit': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, ()),
 		'exit-confirm': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, ()),
 		'message-delete': (GObject.SIGNAL_ACTION | GObject.SIGNAL_RUN_LAST, None, (object,)),
@@ -340,23 +341,12 @@ class KingPhisherClientApplication(_Gtk_Application):
 			gui_utilities.show_dialog_error('Now Exiting', self.get_active_window(), 'A campaign must be selected.')
 			self.quit()
 
-	def do_credential_delete(self, row_ids):
-		if len(row_ids) == 1:
-			self.rpc('db/table/delete', 'credentials', row_ids[0])
-		else:
-			self.rpc('db/table/delete/multi', 'credentials', row_ids)
-
-	def do_message_delete(self, row_ids):
-		if len(row_ids) == 1:
-			self.rpc('db/table/delete', 'messages', row_ids[0])
-		else:
-			self.rpc('db/table/delete/multi', 'messages', row_ids)
-
-	def do_visit_delete(self, row_ids):
-		if len(row_ids) == 1:
-			self.rpc('db/table/delete', 'visits', row_ids[0])
-		else:
-			self.rpc('db/table/delete/multi', 'visits', row_ids)
+	def __do_table_delete(self, table, row_ids):
+		self.rpc.async_call('db/table/delete/multi', args=(table, row_ids))
+	do_credential_delete = functools.partialmethod(__do_table_delete, 'credentials')
+	do_deaddrop_connection_delete = functools.partialmethod(__do_table_delete, 'deaddrop_connections')
+	do_message_delete = functools.partialmethod(__do_table_delete, 'messages')
+	do_visit_delete = functools.partialmethod(__do_table_delete, 'visits')
 
 	def get_graphql_campaign(self, campaign_id=None):
 		"""
@@ -726,6 +716,13 @@ class KingPhisherClientApplication(_Gtk_Application):
 		rpc.username = username
 		self.logger.debug('successfully authenticated to the remote king phisher service')
 
+		server_str = self.config['server']
+		history = self.config['server.history']
+		if server_str in history:
+			history.remove(server_str)
+		history.insert(0, server_str)
+		self.config['server.history'] = history
+
 		event_subscriber = server_events.ServerEventSubscriber(rpc)
 		if not event_subscriber.is_connected:
 			event_subscriber.reconnect = False
@@ -736,10 +733,13 @@ class KingPhisherClientApplication(_Gtk_Application):
 		self.rpc = rpc
 		self.server_events = event_subscriber
 		self._rpc_ping_event = GLib.timeout_add_seconds(parse_timespan('5m'), functools.partial(_rpc_ping, rpc))
-		user = self.rpc.graphql("""\
-		query getUser($name: String!) {
-			db { user(name: $name) { id name } }
-		}""", {'name': self.config['server_username']})['db']['user']
+		user = self.rpc.graphql(
+			"""\
+			query getUser($name: String!) {
+				db { user(name: $name) { id name } }
+			}""",
+			{'name': self.config['server_username']}
+		)['db']['user']
 		self.server_user = ServerUser(id=user['id'], name=user['name'])
 		self.emit('server-connected')
 		return True, ConnectionErrorReason.SUCCESS

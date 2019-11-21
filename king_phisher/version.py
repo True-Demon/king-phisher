@@ -76,10 +76,10 @@ def get_revision(encoding='utf-8'):
 revision = get_revision()
 """The git revision identifying the latest commit if available."""
 
-version_info = collections.namedtuple('version_info', ('major', 'minor', 'micro'))(1, 14, 0)
+version_info = collections.namedtuple('version_info', ('major', 'minor', 'micro'))(1, 15, 0)
 """A tuple representing the version information in the format ('major', 'minor', 'micro')"""
 
-version_label = 'beta1'
+version_label = ''
 """A version label such as alpha or beta."""
 
 version = "{0}.{1}.{2}".format(version_info.major, version_info.minor, version_info.micro)
@@ -100,7 +100,7 @@ if version_label:
 if revision:
 	version += " (rev: {0})".format(revision[:12])
 
-rpc_api_version = collections.namedtuple('rpc_api_version', ('major', 'minor'))(6, 4)
+rpc_api_version = collections.namedtuple('rpc_api_version', ('major', 'minor'))(6, 5)
 """
 A tuple representing the local version of the RPC API for use with compatibility
 checks. The major version is incremented when backwards incompatible changes are
